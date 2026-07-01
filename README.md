@@ -31,6 +31,8 @@ after months of use.
 
 ## Install
 
+**Requires Node 18+** (the same runtime your agents already use for `npx`).
+
 You don't need to publish anything — it runs straight from GitHub.
 
 ```bash
@@ -192,6 +194,12 @@ shared-agent-memory uninstall --purge  # also delete ~/.agent-memory
 
 **Is my memory sent anywhere?** No. It's a local JSON file. Nothing leaves your
 machine unless you sync that file yourself.
+
+**Does it keep separate projects apart?** One shared store holds everything;
+projects are separated by **naming** — entities are `project/file-or-feature`, and
+searching by the project name (e.g. `miko`) returns only that project's facts.
+Generic terms (e.g. `auth`) can span projects — the trade-off that keeps
+cross-project knowledge available when you want it.
 
 **Does the auto-save always fire?** It's instruction-driven (the agent decides),
 so it's reliable but not guaranteed. The manual *"remember X"* command is the
