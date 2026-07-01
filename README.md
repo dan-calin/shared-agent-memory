@@ -45,6 +45,24 @@ cd shared-agent-memory
 node bin/cli.js install
 ```
 
+On Windows, if you cloned this repo locally and `shared-agent-memory` is not
+recognized as a command, run the CLI through Node from the repo folder:
+
+```bat
+cd "C:\Users\Roxan\Desktop\AI Link\shared-agent-memory"
+node .\bin\cli.js install
+node .\bin\cli.js status
+```
+
+To make the shorter `shared-agent-memory ...` command work from any folder, link
+the local package globally:
+
+```bat
+cd "C:\Users\Roxan\Desktop\AI Link\shared-agent-memory"
+npm install -g .
+shared-agent-memory install
+```
+
 The installer **auto-detects** which agents you have and, for each one:
 
 - registers the shared `memory` MCP server,
@@ -73,6 +91,11 @@ You step in only to:
    searches memory first, sees Codex's note, and builds on it — no re-explaining.
 
 ## Commands
+
+The examples below use the installed `shared-agent-memory` command. If you have
+not linked or installed it globally, run the same commands as
+`node bin/cli.js <command>` from the repo folder, or use
+`npx github:dan-calin/shared-agent-memory <command>`.
 
 ```
 shared-agent-memory install       Configure detected agents to share memory
