@@ -73,14 +73,31 @@ You step in only to:
 ## Commands
 
 ```
-shared-agent-memory install      Configure detected agents to share memory
-shared-agent-memory status       Show what is currently configured
-shared-agent-memory uninstall    Remove the server + instruction blocks
-shared-agent-memory help         Full help
+shared-agent-memory install       Configure detected agents to share memory
+shared-agent-memory instructions  Print the instruction block(s) to paste in yourself
+shared-agent-memory status        Show what is currently configured
+shared-agent-memory uninstall     Remove the server + instruction blocks
+shared-agent-memory help          Full help
 ```
 
-Options: `--claude-only`, `--codex-only`, `--memory-dir <path>`, `--dry-run`,
-and `--purge` (uninstall: also delete the memory store).
+Options: `--claude-only`, `--codex-only`, `--manual`, `--memory-dir <path>`,
+`--dry-run`, and `--purge` (uninstall: also delete the memory store).
+
+### Where the instructions go (and how to keep control)
+
+By default, `install` writes a **marker-wrapped** block into your **global**
+instruction files (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`). It only ever adds
+or updates *its own* block — the rest of those files is never touched, so your
+personal instructions are safe.
+
+Prefer to place them yourself? Two options:
+
+- **`install --manual`** — configures the MCP server but **prints** the block
+  instead of writing it, so you can paste it wherever you like.
+- **`instructions`** — reprints the block(s) any time, with placement guidance.
+
+Paste the block into a **global** file (applies to every project) or a
+**project-scoped** `CLAUDE.md` / `AGENTS.md` (applies to just that repo).
 
 ## How it works
 

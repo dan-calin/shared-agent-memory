@@ -37,8 +37,36 @@ function selectTargets(flags) {
   return t;
 }
 
+const PLACEMENT = {
+  claude: { label: 'Claude Code', global: '~/.claude/CLAUDE.md', project: '<project>/CLAUDE.md', agentLabel: 'claude' },
+  codex: { label: 'Codex', global: '~/.codex/AGENTS.md', project: '<project>/AGENTS.md', agentLabel: 'codex' },
+};
+
+// Print the instruction block(s) plus where-to-paste guidance, for users who
+// want to place them by hand instead of letting the installer write the files.
+function printInstructions(targets, memoryDir) {
+  const list = targets && targets.length ? targets : ['claude', 'codex'];
+  log.info('Paste the matching block into ONE file, then restart that agent:');
+  log.plain('');
+  for (const t of list) {
+    const g = PLACEMENT[t];
+    if (!g) continue;
+    log.plain(`  ${g.label}`);
+    log.plain(`    - Global  (every project):  ${g.global}`);
+    log.plain(`    - Project (this repo only): ${g.project}`);
+    log.plain('');
+    log.plain(`  --- copy into a ${g.label} file -----------------------------`);
+    log.plain(instructions.blockFor(g.agentLabel, memoryDir));
+    log.plain(`  -------------------------------------------------------------`);
+    log.plain('');
+  }
+  log.info('The block is marker-wrapped, so you (or a future run) can update or remove');
+  log.info('just that section without touching the rest of your file.');
+}
+
 function cmdInstall(flags) {
   const dry = Boolean(flags['dry-run']);
+  const manual = Boolean(flags.manual);
   const memoryDir = resolveMemoryDir(flags);
   const memoryFile = paths.memoryFile(memoryDir);
 
@@ -62,18 +90,33 @@ function cmdInstall(flags) {
     if (t === 'claude') {
       const r = claude.install({ memoryFile, dry });
       log.step(`Claude Code: ${r.serverMsg}`);
-      const ir = instructions.installInto(paths.claudeInstructionsFile(), 'claude', memoryDir, dry);
-      log.step(`Claude Code instructions: ${ir} (${paths.claudeInstructionsFile()})`);
+      if (!manual) {
+        const ir = instructions.installInto(paths.claudeInstructionsFile(), 'claude', memoryDir, dry);
+        log.step(`Claude Code instructions: ${ir} (${paths.claudeInstructionsFile()})`);
+      }
     } else if (t === 'codex') {
       const r = codex.install({ memoryFile, dry });
       log.step(`Codex: ${r.serverMsg}`);
-      const ir = instructions.installInto(paths.codexInstructionsFile(), 'codex', memoryDir, dry);
-      log.step(`Codex instructions: ${ir} (${paths.codexInstructionsFile()})`);
+      if (!manual) {
+        const ir = instructions.installInto(paths.codexInstructionsFile(), 'codex', memoryDir, dry);
+        log.step(`Codex instructions: ${ir} (${paths.codexInstructionsFile()})`);
+      }
     }
   }
 
   log.done();
-  log.info('Restart your agents (Claude Code, Codex) so they load the new server + instructions.');
+  if (manual) {
+    log.info('MCP server configured. Instruction blocks were NOT written to any file —');
+    log.info('copy the one(s) below into the .md of your choice:');
+    log.plain('');
+    printInstructions(targets, memoryDir);
+  } else {
+    log.info('Instructions were written to your global CLAUDE.md / AGENTS.md — only our');
+    log.info('marker-wrapped block; the rest of those files is left untouched.');
+    log.info('Want to place them yourself (e.g. a project-scoped CLAUDE.md)? Re-run with');
+    log.info('--manual, or run:  shared-agent-memory instructions');
+  }
+  log.info('Then restart your agents so they load the new server + instructions.');
   if (dry) log.warn('Dry run — nothing was written.');
 }
 
@@ -127,6 +170,15 @@ function cmdStatus() {
   }
 }
 
+function cmdInstructions(flags) {
+  const memoryDir = resolveMemoryDir(flags);
+  let targets = ['claude', 'codex'];
+  if (flags['claude-only']) targets = ['claude'];
+  else if (flags['codex-only']) targets = ['codex'];
+  log.title('shared-agent-memory instructions');
+  printInstructions(targets, memoryDir);
+}
+
 const HELP = `
 shared-agent-memory — one shared memory for all your AI coding agents
 
@@ -134,14 +186,17 @@ Usage:
   shared-agent-memory <command> [options]
 
 Commands:
-  install      Configure detected agents (Claude Code, Codex) to share memory
-  uninstall    Remove the memory server + instruction blocks
-  status       Show what is currently configured
-  help         Show this help
+  install       Configure detected agents (Claude Code, Codex) to share memory
+  instructions  Print the instruction block(s) to paste into a .md yourself
+  uninstall     Remove the memory server + instruction blocks
+  status        Show what is currently configured
+  help          Show this help
 
 Options:
-  --claude-only        Only configure Claude Code
-  --codex-only         Only configure Codex
+  --claude-only        Only target Claude Code
+  --codex-only         Only target Codex
+  --manual             (install) configure the MCP server but DON'T write the
+                       instruction block — print it for you to paste instead
   --memory-dir <path>  Use a custom shared memory directory
                        (default: ~/.agent-memory)
   --dry-run            Print what would change without writing anything
@@ -149,7 +204,8 @@ Options:
 
 Examples:
   npx github:dan-calin/shared-agent-memory install
-  shared-agent-memory install --codex-only
+  shared-agent-memory install --manual
+  shared-agent-memory instructions --codex-only
   shared-agent-memory status
   shared-agent-memory uninstall --purge
 `;
@@ -161,6 +217,8 @@ function main() {
     switch (cmd) {
       case 'install':
         return cmdInstall(flags);
+      case 'instructions':
+        return cmdInstructions(flags);
       case 'uninstall':
         return cmdUninstall(flags);
       case 'status':

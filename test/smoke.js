@@ -73,6 +73,14 @@ try {
   assert(!codexToml3.includes('[mcp_servers.memory]'), 'codex memory removed');
   assert(codexToml3.includes('model = "x"'), 'codex unrelated config still intact');
 
+  // Manual mode: configures the server but prints the block instead of writing it.
+  const manualOut = run(['install', '--manual']);
+  const claudeCfg3 = JSON.parse(fs.readFileSync(path.join(tmpHome, '.claude.json'), 'utf8'));
+  assert(claudeCfg3.mcpServers && claudeCfg3.mcpServers.memory, 'manual mode still configures the MCP server');
+  const claudeMd2 = fs.readFileSync(path.join(tmpHome, '.claude', 'CLAUDE.md'), 'utf8');
+  assert(!claudeMd2.includes('Shared agent memory'), 'manual mode does NOT write the instruction block');
+  assert(manualOut.includes('BEGIN shared-agent-memory'), 'manual mode prints the block for pasting');
+
   console.log('\nAll smoke tests passed.');
 } finally {
   fs.rmSync(tmpHome, { recursive: true, force: true });
