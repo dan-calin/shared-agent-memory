@@ -1,0 +1,5 @@
+# Normalize line endings so the installer scripts stay LF on every platform.
+* text=auto eol=lf
+*.js text eol=lf
+*.md text eol=lf
+*.json text eol=lf

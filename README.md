@@ -18,6 +18,9 @@ It's a thin, careful **integration layer** on top of the official
 That server does the storage; this project wires every agent to the *same* store
 and adds tiny, token-efficient instructions so they actually use it well.
 
+Think of it as the shared **episodic memory** layer for your agents — what they
+learn as they work — complementing your committed docs and code, not replacing them.
+
 ## Why
 
 If you run multiple agents, you've felt this: each one starts blind, so you
@@ -44,7 +47,7 @@ The installer **auto-detects** which agents you have and, for each one:
 
 - registers the shared `memory` MCP server,
 - points it at one shared file (`~/.agent-memory/memory.json`),
-- adds a ~6-line instruction block so the agent knows to use it.
+- adds a tiny instruction block so the agent knows to use it.
 
 Then **restart your agents** (they read MCP config + instructions at startup).
 
@@ -62,8 +65,8 @@ You step in only to:
 
 ### Example: the handoff
 
-1. Codex refactors your payment retry logic and saves
-   `billing.py: retry → exponential backoff (codex, 2026-07-01 14:32)`.
+1. Codex refactors your payment retry logic and saves — under entity
+   `tradebot/billing.py` — the note `retry → exponential backoff (codex, 2026-07-01 14:32)`.
 2. Tomorrow, a fresh **Claude Code** session is asked to extend billing. It
    searches memory first, sees Codex's note, and builds on it — no re-explaining.
 
@@ -82,16 +85,71 @@ and `--purge` (uninstall: also delete the memory store).
 ## How it works
 
 - **Storage:** `@modelcontextprotocol/server-memory`, a knowledge graph of
-  *entities* (a file or feature) with short *observations* attached.
+  *entities* (named `project/file-or-feature`) with short *observations*, plus
+  *relations* between them (`serviceA --depends-on--> db`) so recall is
+  relationship-aware, not just keyword matching.
 - **Sharing:** every agent's MCP config launches that server with the same
-  `MEMORY_FILE_PATH`, so they all read/write one JSON file.
+  `MEMORY_FILE_PATH`, so they all read/write one plain JSON file.
 - **Discipline:** the installed instructions enforce token efficiency — search
-  with a few keywords (never dump the whole graph), and save one terse line per
-  unit of work.
+  with a few keywords (never dump the whole graph), scope entities by project so
+  searches stay relevant, and save one terse line per unit of work.
 
 See [`templates/memory-readme.md`](templates/memory-readme.md) for the data model
 and [`examples/manual-agent-instructions.md`](examples/manual-agent-instructions.md)
 for copy-paste snippets to wire up other tools by hand.
+
+## Why a server instead of plain files?
+
+A fair question — some teams keep memory as plain files grepped at session start
+and argue a "memory service" is a fragile dependency. This project splits the
+difference:
+
+- **Under the hood it *is* a plain file.** `~/.agent-memory/memory.json` is
+  human-readable, diffable, and git-able. Even if the server never ran you could
+  `cat`, grep, or hand-edit it.
+- **The "server" is not a daemon.** Each agent launches
+  `@modelcontextprotocol/server-memory` on demand via `npx`, and it exits with the
+  session — nothing to keep running, monitor, or deploy.
+- **What you gain over grep:** a structured query interface (`search_nodes`) and
+  real relations (`A --depends-on--> B`) that every MCP-speaking tool understands,
+  instead of each tool inventing its own file format.
+- **Honest cost:** it needs Node, and the first run does an `npx` fetch. On a
+  locked-down or offline CI box, read the JSON file directly instead.
+
+## Versioning & governance
+
+Because the store is a single JSON file, you get history and rollback for free:
+put `~/.agent-memory/` under git. If an agent writes something wrong, `git revert`
+it. Diffs show exactly what each agent learned and when.
+
+## Design goals & non-goals
+
+**Goals:** cross-tool, local, own-your-data, zero standing infrastructure, and
+token-efficient by construction.
+
+**Non-goals (by design):**
+
+- **No auto-ingestion** of external sources (Drive, APIs, tickets). Agents record
+  what they learn; this isn't a crawler.
+- **No belief modeling** — confidence scores, decay, or contradiction resolution.
+  Entries are facts you can prune manually. (Possible future work; see roadmap.)
+- **No hosted service or team RBAC.** For managed, multi-tenant memory, see the
+  alternatives below.
+
+## Alternatives
+
+If your needs outgrow a shared file, heavier memory platforms exist —
+[Mem0](https://mem0.ai), [Zep](https://www.getzep.com), and
+[Cognee](https://www.cognee.ai) offer hosted stores, scoping, and decay;
+[engram](https://github.com/Harshitk-cp/engram) is an open-source "memory as
+beliefs" HTTP service. `shared-agent-memory` deliberately stays at the opposite
+end: no infra, one file, works across Claude Code and Codex today.
+
+## Roadmap
+
+- Optional pruning / staleness helpers (a `prune` command).
+- More agents out of the box (Cursor, Windsurf, …).
+- Optional per-project memory stores as a first-class flag.
 
 ## Supported agents
 
