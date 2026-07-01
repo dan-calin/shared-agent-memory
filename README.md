@@ -29,6 +29,47 @@ hand-write context files and paste them around. This replaces that with a shared
 instead of re-reading a growing document — which keeps it fast and cheap even
 after months of use.
 
+## Edit coordination
+
+When you run Claude Code and Codex in the same repo, shared memory is not enough:
+two agents can still open the same file and unknowingly overwrite each other's
+work. The optional coordination layer gives them a shared work board and warning
+hooks for active edits.
+
+Turn it on once:
+
+```bash
+shared-agent-memory coordination on
+```
+
+Then agents can claim the files they expect to edit:
+
+```bash
+shared-agent-memory claim lib/board.js bin/cli.js --as codex --note "wire CLI"
+shared-agent-memory board
+shared-agent-memory release --as codex
+```
+
+The board stores file-path claims in `~/.agent-memory/activity.jsonl`. Claims are
+advisory, not locks, and expire automatically after 2 hours so a crashed session
+does not leave files permanently claimed.
+
+`coordination on` adds a separate marker-wrapped instruction block to Claude and
+Codex, and installs an idempotent Claude Code `PreToolUse` hook for
+`Edit|Write|MultiEdit` without clobbering existing hooks. Before Claude edits a
+file, the hook checks the board and adds warning context if another agent has
+claimed the same file:
+
+```text
+Heads-up: lib/board.js overlaps with an active shared-agent-memory claim.
+- codex claims lib/board.js (4m old) - wire CLI
+```
+
+By default the hook runs in `warn` mode, so it does **not** block edits. It simply
+gives the agent enough context to coordinate before touching the same file. Use
+`shared-agent-memory coordination off` to remove the coordination instruction
+block and only this project's hook.
+
 ## Install
 
 **Requires Node 18+** (the same runtime your agents already use for `npx`).
@@ -113,37 +154,6 @@ shared-agent-memory help          Full help
 Options: `--claude-only`, `--codex-only`, `--manual`, `--memory-dir <path>`,
 `--as <agent>`, `--note <text>`, `--mode <warn|block>`, `--dry-run`, and
 `--purge` (uninstall: also delete the memory store).
-
-## Optional edit coordination
-
-Shared memory handles durable knowledge. Edit coordination is a separate opt-in
-layer for moments when you run multiple agents in the same repo and want a
-lightweight heads-up before they touch the same files.
-
-```bash
-shared-agent-memory coordination on
-shared-agent-memory claim lib/board.js bin/cli.js --as codex --note "wire CLI"
-shared-agent-memory board
-shared-agent-memory release --as codex
-```
-
-`coordination on` adds a separate marker-wrapped instruction block to
-`~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`, so the normal memory instructions
-stay small. The block tells Claude to claim files as `claude` and Codex to claim
-files as `codex`.
-
-It also installs an idempotent Claude Code `PreToolUse` hook in
-`~/.claude/settings.json` for `Edit|Write|MultiEdit`:
-
-```bash
-node <absolute path to bin/cli.js> hook pre-edit --mode warn
-```
-
-The hook reads Claude's pre-edit JSON from stdin, checks the shared board, and
-adds warning context when another agent has an active claim on the same path.
-Warnings are advisory by default; they do not block edits. Existing Claude hooks
-are preserved, and `coordination off` removes only this project's hook and
-coordination instruction block.
 
 ### Where the instructions go (and how to keep control)
 
