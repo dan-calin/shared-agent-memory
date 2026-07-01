@@ -75,6 +75,7 @@ You step in only to:
 ```
 shared-agent-memory install       Configure detected agents to share memory
 shared-agent-memory instructions  Print the instruction block(s) to paste in yourself
+shared-agent-memory doctor        Check / repair the memory file's format
 shared-agent-memory status        Show what is currently configured
 shared-agent-memory uninstall     Remove the server + instruction blocks
 shared-agent-memory help          Full help
@@ -122,8 +123,9 @@ and argue a "memory service" is a fragile dependency. This project splits the
 difference:
 
 - **Under the hood it *is* a plain file.** `~/.agent-memory/memory.json` is
-  human-readable, diffable, and git-able. Even if the server never ran you could
-  `cat`, grep, or hand-edit it.
+  human-readable, diffable, and git-able (NDJSON — one record per line). Even if
+  the server never ran you could `cat`, grep, or carefully hand-edit it. If a hand
+  edit ever breaks the format, `shared-agent-memory doctor` repairs it.
 - **The "server" is not a daemon.** Each agent launches
   `@modelcontextprotocol/server-memory` on demand via `npx`, and it exits with the
   session — nothing to keep running, monitor, or deploy.
@@ -197,6 +199,10 @@ always-there backstop.
 
 **Windows?** Yes — Windows, macOS, and Linux. On Windows the server is launched
 via `cmd /c npx` automatically.
+
+**Memory server throwing JSON parse errors?** The store is NDJSON (one object per
+line); something wrote it pretty-printed. Run `shared-agent-memory doctor` to
+repair it — it backs up the original first.
 
 ## Credits
 

@@ -81,6 +81,19 @@ try {
   assert(!claudeMd2.includes('Shared agent memory'), 'manual mode does NOT write the instruction block');
   assert(manualOut.includes('BEGIN shared-agent-memory'), 'manual mode prints the block for pasting');
 
+  // doctor: repair a pretty-printed store back into NDJSON.
+  const memFile = path.join(tmpHome, '.agent-memory', 'memory.json');
+  fs.writeFileSync(
+    memFile,
+    JSON.stringify({ entities: [{ name: 'p/x', entityType: 'feature', observations: ['hi'] }], relations: [] }, null, 2)
+  );
+  run(['doctor']);
+  const repaired = fs.readFileSync(memFile, 'utf8').trim();
+  assert(repaired.split('\n').length === 1, 'doctor collapsed pretty JSON to one NDJSON line');
+  const rec = JSON.parse(repaired);
+  assert(rec.type === 'entity' && rec.name === 'p/x', 'doctor preserved the entity data');
+  assert(fs.existsSync(memFile + '.bak'), 'doctor backed up the original');
+
   console.log('\nAll smoke tests passed.');
 } finally {
   fs.rmSync(tmpHome, { recursive: true, force: true });

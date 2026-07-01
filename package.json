@@ -1,6 +1,6 @@
 {
   "name": "shared-agent-memory",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "One shared memory for all your AI coding agents (Claude Code, Codex, any MCP client) via a single MCP server.",
   "bin": {
     "shared-agent-memory": "bin/cli.js"

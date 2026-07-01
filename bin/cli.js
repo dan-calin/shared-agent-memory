@@ -8,6 +8,7 @@ const log = require('../lib/log');
 const claude = require('../lib/claude');
 const codex = require('../lib/codex');
 const instructions = require('../lib/instructions');
+const store = require('../lib/store');
 
 function parseArgs(argv) {
   const out = { _: [], flags: {} };
@@ -170,6 +171,38 @@ function cmdStatus() {
   }
 }
 
+function cmdDoctor(flags) {
+  const dry = Boolean(flags['dry-run']);
+  const file = paths.memoryFile(resolveMemoryDir(flags));
+  log.title('shared-agent-memory doctor');
+  log.info(`Memory file: ${file}`);
+
+  if (!fs.existsSync(file)) {
+    log.info('No memory file yet — nothing to check.');
+    return;
+  }
+  const raw = fs.readFileSync(file, 'utf8');
+  const result = store.classify(raw);
+
+  if (result.kind === 'empty') return log.ok('Store is empty — OK.');
+  if (result.kind === 'ndjson') {
+    return log.ok(`Store is valid NDJSON (${result.count} record${result.count === 1 ? '' : 's'}) — OK.`);
+  }
+  if (result.kind === 'pretty') {
+    log.warn('Store is pretty-printed JSON — the memory server cannot read this.');
+    if (dry) return log.info('Dry run — would back up the file and rewrite it as NDJSON.');
+    fs.writeFileSync(file + '.bak', raw);
+    fs.writeFileSync(file, store.toNdjson(result.doc));
+    log.ok(`Repaired → NDJSON. Original backed up to ${file}.bak`);
+    return log.info('Restart your agents; memory search/read will work again.');
+  }
+  log.warn('Store is not parseable JSON (corrupt).');
+  if (!dry) {
+    fs.writeFileSync(file + '.bak', raw);
+    log.info(`Backed up to ${file}.bak — inspect it by hand, or delete the store to reset.`);
+  }
+}
+
 function cmdInstructions(flags) {
   const memoryDir = resolveMemoryDir(flags);
   let targets = ['claude', 'codex'];
@@ -188,6 +221,7 @@ Usage:
 Commands:
   install       Configure detected agents (Claude Code, Codex) to share memory
   instructions  Print the instruction block(s) to paste into a .md yourself
+  doctor        Check the memory file's format and repair it if corrupted
   uninstall     Remove the memory server + instruction blocks
   status        Show what is currently configured
   help          Show this help
@@ -219,6 +253,8 @@ function main() {
         return cmdInstall(flags);
       case 'instructions':
         return cmdInstructions(flags);
+      case 'doctor':
+        return cmdDoctor(flags);
       case 'uninstall':
         return cmdUninstall(flags);
       case 'status':

@@ -5,7 +5,8 @@ Codex, any MCP client). They read and write the same file so what one agent
 learns, the others know. Think of it as shared **episodic memory** — what your
 agents learn as they work — complementing your committed docs, not replacing them.
 
-- **Data file:** `{{MEMORY_DIR}}/memory.json` (plain JSON — readable, diffable, git-able)
+- **Data file:** `{{MEMORY_DIR}}/memory.json` — newline-delimited JSON (NDJSON),
+  one record per line; readable, diffable, git-able
 - **Server:** `@modelcontextprotocol/server-memory` (launched on demand by each agent; no daemon)
 
 ## Data model (keep it tiny)
@@ -40,9 +41,14 @@ Searches stay predictable only if entities are named consistently.
 ## Maintenance
 
 - **Inspect:** open `memory.json`, or ask any agent to `read_graph` once.
+- **Format:** it is **NDJSON — one JSON object per line.** If you hand-edit, keep
+  that shape; do **not** pretty-print it, or the server will fail to load it.
+- **Broken?** If the server throws a JSON parse error, run
+  `shared-agent-memory doctor` — it detects a pretty-printed file and rewrites it
+  as NDJSON (backing up the original first).
 - **Reset:** delete `memory.json` (it is recreated empty).
-- **Version / roll back:** it is just JSON — put this folder under git for full
-  history and easy rollback if an agent writes something wrong.
+- **Version / roll back:** put this folder under git for full history and easy
+  rollback if an agent writes something wrong.
 
 ## Connecting another tool
 
