@@ -77,6 +77,10 @@ You step in only to:
 ```
 shared-agent-memory install       Configure detected agents to share memory
 shared-agent-memory instructions  Print the instruction block(s) to paste in yourself
+shared-agent-memory coordination  Turn optional edit coordination on/off/status
+shared-agent-memory claim         Claim files on the shared coordination board
+shared-agent-memory release       Release this agent's active coordination claim
+shared-agent-memory board         Show active coordination claims
 shared-agent-memory doctor        Check / repair the memory file's format
 shared-agent-memory status        Show what is currently configured
 shared-agent-memory uninstall     Remove the server + instruction blocks
@@ -84,7 +88,39 @@ shared-agent-memory help          Full help
 ```
 
 Options: `--claude-only`, `--codex-only`, `--manual`, `--memory-dir <path>`,
-`--dry-run`, and `--purge` (uninstall: also delete the memory store).
+`--as <agent>`, `--note <text>`, `--mode <warn|block>`, `--dry-run`, and
+`--purge` (uninstall: also delete the memory store).
+
+## Optional edit coordination
+
+Shared memory handles durable knowledge. Edit coordination is a separate opt-in
+layer for moments when you run multiple agents in the same repo and want a
+lightweight heads-up before they touch the same files.
+
+```bash
+shared-agent-memory coordination on
+shared-agent-memory claim lib/board.js bin/cli.js --as codex --note "wire CLI"
+shared-agent-memory board
+shared-agent-memory release --as codex
+```
+
+`coordination on` adds a separate marker-wrapped instruction block to
+`~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`, so the normal memory instructions
+stay small. The block tells Claude to claim files as `claude` and Codex to claim
+files as `codex`.
+
+It also installs an idempotent Claude Code `PreToolUse` hook in
+`~/.claude/settings.json` for `Edit|Write|MultiEdit`:
+
+```bash
+node <absolute path to bin/cli.js> hook pre-edit --mode warn
+```
+
+The hook reads Claude's pre-edit JSON from stdin, checks the shared board, and
+adds warning context when another agent has an active claim on the same path.
+Warnings are advisory by default; they do not block edits. Existing Claude hooks
+are preserved, and `coordination off` removes only this project's hook and
+coordination instruction block.
 
 ### Where the instructions go (and how to keep control)
 

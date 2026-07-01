@@ -9,13 +9,23 @@ const claude = require('../lib/claude');
 const codex = require('../lib/codex');
 const instructions = require('../lib/instructions');
 const store = require('../lib/store');
+const board = require('../lib/board');
+const coordination = require('../lib/coordination');
 
 function parseArgs(argv) {
   const out = { _: [], flags: {} };
+  const valueFlags = new Set(['memory-dir', 'as', 'note', 'mode']);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--memory-dir') {
-      out.flags.memoryDir = argv[++i];
+    if (a.startsWith('--') && a.includes('=')) {
+      const eq = a.indexOf('=');
+      const key = a.slice(2, eq);
+      const value = a.slice(eq + 1);
+      out.flags[key === 'memory-dir' ? 'memoryDir' : key] = value;
+    } else if (valueFlags.has(a.slice(2))) {
+      const key = a.slice(2);
+      if (i + 1 >= argv.length) throw new Error(`${a} requires a value`);
+      out.flags[key === 'memory-dir' ? 'memoryDir' : key] = argv[++i];
     } else if (a.startsWith('--')) {
       out.flags[a.slice(2)] = true;
     } else {
@@ -212,6 +222,130 @@ function cmdInstructions(flags) {
   printInstructions(targets, memoryDir);
 }
 
+function requireAgent(flags) {
+  if (!flags.as) throw new Error('--as <agent> is required');
+  return String(flags.as);
+}
+
+function formatConflict(conflict) {
+  const note = conflict.note ? ` - ${conflict.note}` : '';
+  return `${conflict.agent} claims ${conflict.file} (${conflict.ageMin}m old)${note}`;
+}
+
+function cmdClaim(args, flags) {
+  const agent = requireAgent(flags);
+  const files = args.slice(1);
+  if (files.length === 0) throw new Error('claim requires at least one file');
+  const memoryDir = resolveMemoryDir(flags);
+  const conflicts = board.claim(memoryDir, agent, files, flags.note || '', process.cwd());
+  log.ok(`Claimed ${files.length} file${files.length === 1 ? '' : 's'} as ${agent}.`);
+  if (conflicts.length) {
+    log.warn('Active conflict warning:');
+    for (const c of conflicts) log.info(formatConflict(c));
+  }
+}
+
+function cmdRelease(flags) {
+  const agent = requireAgent(flags);
+  const count = board.release(resolveMemoryDir(flags), agent);
+  log.ok(`Released ${count} claim${count === 1 ? '' : 's'} for ${agent}.`);
+}
+
+function cmdBoard(flags) {
+  const claims = board.readClaims(resolveMemoryDir(flags));
+  log.title('shared-agent-memory board');
+  if (claims.length === 0) {
+    log.info('No active claims.');
+    return;
+  }
+  for (const c of claims) {
+    const ageMin = Math.round((Date.now() - c.ts) / 60000);
+    const note = c.note ? ` - ${c.note}` : '';
+    log.plain(`  ${c.agent} (${ageMin}m)${note}`);
+    for (const file of c.files || []) log.plain(`    - ${file}`);
+  }
+}
+
+function readStdin() {
+  return fs.readFileSync(0, 'utf8');
+}
+
+function conflictWarning(file, conflicts) {
+  const lines = [
+    `Heads-up: ${file} overlaps with an active shared-agent-memory claim.`,
+    ...conflicts.map((c) => `- ${formatConflict(c)}`),
+    'Coordinate before editing if both agents are still working.',
+  ];
+  return lines.join('\n');
+}
+
+function cmdHook(args, flags) {
+  const hook = args[1];
+  const sub = args[2];
+  if (hook !== 'pre-edit') throw new Error('hook only supports: pre-edit');
+  if (sub) throw new Error(`unknown hook argument: ${sub}`);
+
+  const mode = flags.mode || 'warn';
+  const raw = readStdin().trim();
+  const payload = raw ? JSON.parse(raw) : {};
+  const input = payload.tool_input || payload.toolInput || payload.input || {};
+  const file = input.file_path || input.filePath || input.path;
+  if (!file) return;
+
+  const conflicts = board.checkFile(resolveMemoryDir(flags), 'claude', file);
+  if (conflicts.length === 0) return;
+
+  const warning = conflictWarning(file, conflicts);
+  if (mode === 'block') {
+    console.error(warning);
+    process.exitCode = 2;
+    return;
+  }
+  if (mode !== 'warn') throw new Error('--mode must be warn or block');
+  console.log(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: coordination.HOOK_EVENT,
+      additionalContext: warning,
+    },
+  }));
+}
+
+function cmdCoordination(args, flags) {
+  const action = args[1] || 'status';
+  const dry = Boolean(flags['dry-run']);
+  const cliFile = path.resolve(__dirname, 'cli.js');
+  const hookCmd = coordination.hookCommand(cliFile);
+
+  if (action === 'on') {
+    log.title('Turning shared-agent-memory coordination on' + (dry ? ' (dry run)' : ''));
+    log.step(`Claude Code instructions: ${coordination.installInstructions(paths.claudeInstructionsFile(), 'claude', dry)} (${paths.claudeInstructionsFile()})`);
+    log.step(`Codex instructions: ${coordination.installInstructions(paths.codexInstructionsFile(), 'codex', dry)} (${paths.codexInstructionsFile()})`);
+    log.step(`Claude Code PreToolUse hook: ${coordination.installClaudeHook(paths.claudeSettingsFile(), hookCmd, dry)} (${paths.claudeSettingsFile()})`);
+    log.done();
+    log.info('Coordination uses advisory file-path claims and warnings; it does not block edits by default.');
+    return;
+  }
+
+  if (action === 'off') {
+    log.title('Turning shared-agent-memory coordination off' + (dry ? ' (dry run)' : ''));
+    log.step(`Claude Code instructions: ${coordination.removeInstructions(paths.claudeInstructionsFile(), dry)}`);
+    log.step(`Codex instructions: ${coordination.removeInstructions(paths.codexInstructionsFile(), dry)}`);
+    log.step(`Claude Code PreToolUse hook: ${coordination.removeClaudeHook(paths.claudeSettingsFile(), hookCmd, dry)}`);
+    log.done();
+    return;
+  }
+
+  if (action === 'status') {
+    log.title('shared-agent-memory coordination status');
+    log.plain(`  Claude instructions ${mark(coordination.instructionsInstalled(paths.claudeInstructionsFile()))}`);
+    log.plain(`  Codex instructions  ${mark(coordination.instructionsInstalled(paths.codexInstructionsFile()))}`);
+    log.plain(`  Claude hook         ${mark(coordination.claudeHookInstalled(paths.claudeSettingsFile(), hookCmd))}`);
+    return;
+  }
+
+  throw new Error('coordination supports: on, off, status');
+}
+
 const HELP = `
 shared-agent-memory — one shared memory for all your AI coding agents
 
@@ -221,6 +355,11 @@ Usage:
 Commands:
   install       Configure detected agents (Claude Code, Codex) to share memory
   instructions  Print the instruction block(s) to paste into a .md yourself
+  claim         Claim files on the shared coordination board
+  release       Release this agent's active coordination claim
+  board         Show active coordination claims
+  coordination  Turn advisory coordination instructions/hooks on or off
+  hook          Internal hook entrypoints for supported agents
   doctor        Check the memory file's format and repair it if corrupted
   uninstall     Remove the memory server + instruction blocks
   status        Show what is currently configured
@@ -231,6 +370,9 @@ Options:
   --codex-only         Only target Codex
   --manual             (install) configure the MCP server but DON'T write the
                        instruction block — print it for you to paste instead
+  --as <agent>         Agent label for claim/release (for example codex, claude)
+  --note <text>        Short note for a claim
+  --mode <warn|block>  Hook behavior (default: warn)
   --memory-dir <path>  Use a custom shared memory directory
                        (default: ~/.agent-memory)
   --dry-run            Print what would change without writing anything
@@ -240,6 +382,10 @@ Examples:
   npx github:dan-calin/shared-agent-memory install
   shared-agent-memory install --manual
   shared-agent-memory instructions --codex-only
+  shared-agent-memory coordination on
+  shared-agent-memory claim lib/cli.js --as codex --note "wire CLI"
+  shared-agent-memory board
+  shared-agent-memory release --as codex
   shared-agent-memory status
   shared-agent-memory uninstall --purge
 `;
@@ -253,6 +399,16 @@ function main() {
         return cmdInstall(flags);
       case 'instructions':
         return cmdInstructions(flags);
+      case 'claim':
+        return cmdClaim(_, flags);
+      case 'release':
+        return cmdRelease(flags);
+      case 'board':
+        return cmdBoard(flags);
+      case 'hook':
+        return cmdHook(_, flags);
+      case 'coordination':
+        return cmdCoordination(_, flags);
       case 'doctor':
         return cmdDoctor(flags);
       case 'uninstall':
