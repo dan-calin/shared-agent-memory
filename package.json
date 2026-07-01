@@ -1,0 +1,32 @@
+{
+  "name": "shared-agent-memory",
+  "version": "0.1.0",
+  "description": "One shared memory for all your AI coding agents (Claude Code, Codex, any MCP client) via a single MCP server.",
+  "bin": {
+    "shared-agent-memory": "bin/cli.js"
+  },
+  "scripts": {
+    "test": "node test/smoke.js"
+  },
+  "keywords": [
+    "mcp",
+    "claude-code",
+    "codex",
+    "ai-agents",
+    "memory",
+    "knowledge-graph",
+    "model-context-protocol"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "templates",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ]
+}

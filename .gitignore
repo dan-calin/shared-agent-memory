@@ -1,0 +1,6 @@
+node_modules/
+*.log
+.DS_Store
+# local test artifacts
+test/.tmp/
+memory.json
