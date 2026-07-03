@@ -52,7 +52,15 @@ shared-agent-memory release --as codex
 
 The board stores file-path claims in `~/.agent-memory/activity.jsonl`. Claims are
 advisory, not locks, and expire automatically after 2 hours so a crashed session
-does not leave files permanently claimed.
+does not leave files permanently claimed. Claiming more files **merges** them into
+your existing claim (use `--replace` to start over), and two paths only conflict
+when they are actually the same file (relative vs absolute), not merely because
+they share a basename like `index.js`.
+
+**Parallel sessions of the same tool** (e.g. two Claude Code windows) coordinate
+too: claims record a session id (`--session <id>`, auto-detected from
+`CLAUDE_SESSION_ID` when present), and the pre-edit hook warns a Claude session
+about claims made by *other* Claude sessions — never about its own.
 
 `coordination on` adds a separate marker-wrapped instruction block to Claude and
 Codex, and installs an idempotent Claude Code `PreToolUse` hook for
@@ -66,9 +74,11 @@ Heads-up: lib/board.js overlaps with an active shared-agent-memory claim.
 ```
 
 By default the hook runs in `warn` mode, so it does **not** block edits. It simply
-gives the agent enough context to coordinate before touching the same file. Use
+gives the agent enough context to coordinate before touching the same file. Prefer
+hard stops? `shared-agent-memory coordination on --mode block` refuses conflicting
+edits until the claim is released or expires. Use
 `shared-agent-memory coordination off` to remove the coordination instruction
-block and only this project's hook.
+block and only this project's hook (`uninstall` also tears all of this down).
 
 ## Install
 
@@ -145,15 +155,17 @@ shared-agent-memory coordination  Turn optional edit coordination on/off/status
 shared-agent-memory claim         Claim files on the shared coordination board
 shared-agent-memory release       Release this agent's active coordination claim
 shared-agent-memory board         Show active coordination claims
-shared-agent-memory doctor        Check / repair the memory file's format
+shared-agent-memory doctor        Check / repair the memory file and coordination board
 shared-agent-memory status        Show what is currently configured
 shared-agent-memory uninstall     Remove the server + instruction blocks
 shared-agent-memory help          Full help
 ```
 
 Options: `--claude-only`, `--codex-only`, `--manual`, `--memory-dir <path>`,
-`--as <agent>`, `--note <text>`, `--mode <warn|block>`, `--dry-run`, and
-`--purge` (uninstall: also delete the memory store).
+`--as <agent>`, `--note <text>`, `--session <id>` (claim/release: distinguish
+parallel sessions of the same tool), `--replace` (claim: fresh claim instead of
+merging), `--mode <warn|block>` (coordination on: hook behavior), `--dry-run`,
+and `--purge` (uninstall: also delete the memory store).
 
 ### Where the instructions go (and how to keep control)
 
@@ -258,6 +270,9 @@ Want another agent supported out of the box? PRs welcome — add a module under
 shared-agent-memory uninstall          # remove server + instructions, keep memory
 shared-agent-memory uninstall --purge  # also delete ~/.agent-memory
 ```
+
+Uninstall also removes the coordination instruction block and the Claude Code
+pre-edit hook if `coordination on` was ever run, so nothing stale is left behind.
 
 ## FAQ
 

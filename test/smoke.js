@@ -14,11 +14,9 @@ const cli = path.join(__dirname, '..', 'bin', 'cli.js');
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sam-test-'));
 
 function run(args, input) {
-  return execFileSync('node', [cli, ...args], {
-    env: { ...process.env, SHARED_AGENT_MEMORY_HOME: tmpHome, NO_COLOR: '1' },
-    encoding: 'utf8',
-    input,
-  });
+  const env = { ...process.env, SHARED_AGENT_MEMORY_HOME: tmpHome, NO_COLOR: '1' };
+  delete env.CLAUDE_SESSION_ID; // keep session behavior deterministic in tests
+  return execFileSync('node', [cli, ...args], { env, encoding: 'utf8', input });
 }
 
 function assert(cond, msg) {
@@ -66,6 +64,13 @@ try {
   const codexToml2 = fs.readFileSync(path.join(tmpHome, '.codex', 'config.toml'), 'utf8');
   const count = (codexToml2.match(/\[mcp_servers\.memory\]/g) || []).length;
   assert(count === 1, 'codex memory block not duplicated on re-install');
+
+  // Replacing an unrelated "memory" server must be called out loudly.
+  const cfgClobber = JSON.parse(fs.readFileSync(path.join(tmpHome, '.claude.json'), 'utf8'));
+  cfgClobber.mcpServers.memory = { type: 'stdio', command: 'my-own-memory-server', args: [] };
+  fs.writeFileSync(path.join(tmpHome, '.claude.json'), JSON.stringify(cfgClobber, null, 2) + '\n');
+  const clobberOut = run(['install']);
+  assert(clobberOut.includes('REPLACED'), 'install warns when replacing an unrelated memory server');
 
   // Uninstall removes everything it added.
   run(['uninstall']);
@@ -121,6 +126,16 @@ try {
 
   const statusOut = run(['coordination', 'status']);
   assert(statusOut.includes('Claude hook'), 'coordination status reports hook state');
+  assert(statusOut.includes('(warn)'), 'coordination status reports hook mode');
+
+  // --mode block updates the installed hook in place instead of stacking a duplicate.
+  run(['coordination', 'on', '--mode', 'block']);
+  const settingsBlockCfg = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+  const blockCmds = settingsBlockCfg.hooks.PreToolUse.flatMap((e) => e.hooks || []).map((h) => h.command);
+  const oursBlock = blockCmds.filter((c) => c && c.includes('hook pre-edit'));
+  assert(oursBlock.length === 1 && oursBlock[0].includes('--mode block'), 'coordination on --mode block takes effect');
+  assert((run(['coordination', 'status'])).includes('(block)'), 'status reflects block mode');
+  run(['coordination', 'on']); // back to warn for the rest of the test
 
   // Board: claim, detect conflict, warn from the hook, release, and ignore expired claims.
   const claimOut = run(['claim', 'src/a.js', '--as', 'codex', '--note', 'touching src']);
@@ -128,12 +143,16 @@ try {
   const boardOut = run(['board']);
   assert(boardOut.includes('codex') && boardOut.includes('src/a.js'), 'board shows active claims');
 
-  const conflictOut = run(['claim', 'a.js', '--as', 'claude', '--note', 'same basename']);
+  // Relative vs absolute forms of the SAME file conflict…
+  const conflictOut = run(['claim', path.resolve('src/a.js'), '--as', 'claude', '--note', 'same file, absolute']);
   assert(conflictOut.includes('Active conflict warning') && conflictOut.includes('codex'), 'claim warns on conflicting file');
+  // …but merely sharing a basename in different directories does NOT.
+  const noConfOut = run(['claim', 'other/dir/a.js', '--as', 'claude']);
+  assert(!noConfOut.includes('Active conflict warning'), 'same basename in a different directory is not a conflict');
 
   const hookOut = run(
     ['hook', 'pre-edit', '--mode', 'warn'],
-    JSON.stringify({ tool_input: { file_path: path.join('repo', 'src', 'a.js') } })
+    JSON.stringify({ cwd: process.cwd(), tool_input: { file_path: path.resolve('src/a.js') } })
   );
   const hookJson = JSON.parse(hookOut);
   assert(
@@ -143,9 +162,63 @@ try {
     'pre-edit hook emits Claude warning context'
   );
 
+  // Block mode refuses the edit with exit code 2 and a reason on stderr.
+  let blocked = null;
+  try {
+    run(
+      ['hook', 'pre-edit', '--mode', 'block'],
+      JSON.stringify({ cwd: process.cwd(), tool_input: { file_path: path.resolve('src/a.js') } })
+    );
+  } catch (e) {
+    blocked = e;
+  }
+  assert(blocked && blocked.status === 2 && String(blocked.stderr).includes('Heads-up'), 'block mode exits 2 with a reason');
+
   const releaseOut = run(['release', '--as', 'codex']);
   assert(releaseOut.includes('Released 1 claim for codex'), 'release removes this agent claim');
   run(['release', '--as', 'claude']);
+
+  // parseArgs: a bare positional that *ends like* a value flag stays positional.
+  const biasOut = run(['claim', 'bias', '--as', 'codex']);
+  assert(biasOut.includes('Claimed 1 file as codex'), 'positional arg is not eaten as a value flag');
+  assert(run(['board']).includes('bias'), 'board shows the oddly-named file');
+  run(['release', '--as', 'codex']);
+
+  // Claims merge by default; --replace starts over; merged set is one claim.
+  run(['claim', 'a1.js', '--as', 'codex']);
+  run(['claim', 'a2.js', '--as', 'codex']);
+  const mergedBoard = run(['board']);
+  assert(mergedBoard.includes('a1.js') && mergedBoard.includes('a2.js'), 'a second claim merges instead of dropping the first');
+  run(['claim', 'b1.js', '--as', 'codex', '--replace']);
+  const replacedBoard = run(['board']);
+  assert(replacedBoard.includes('b1.js') && !replacedBoard.includes('a1.js'), '--replace starts a fresh claim');
+  assert(run(['release', '--as', 'codex']).includes('Released 1 claim'), 'merged claims stay a single claim');
+
+  // Sessions: two parallel Claude Code sessions warn each other; a session
+  // never warns about its own claim.
+  run(['claim', 'x.js', '--as', 'claude', '--session', 'AAA']);
+  const otherSession = run(
+    ['hook', 'pre-edit'],
+    JSON.stringify({ session_id: 'BBB', cwd: process.cwd(), tool_input: { file_path: path.resolve('x.js') } })
+  );
+  assert(otherSession.includes('claude'), 'hook warns a different Claude session about the claim');
+  const sameSession = run(
+    ['hook', 'pre-edit'],
+    JSON.stringify({ session_id: 'AAA', cwd: process.cwd(), tool_input: { file_path: path.resolve('x.js') } })
+  );
+  assert(sameSession.trim() === '', 'hook stays quiet for the session that made the claim');
+  assert(run(['release', '--as', 'claude', '--session', 'AAA']).includes('Released 1 claim'), 'session-scoped release works');
+
+  // Hook robustness: bad stdin must never break the user's edit; a bad mode must.
+  assert(run(['hook', 'pre-edit'], '').trim() === '', 'hook tolerates empty stdin');
+  assert(run(['hook', 'pre-edit'], 'not json').trim() === '', 'hook tolerates malformed stdin');
+  let badMode = false;
+  try {
+    run(['hook', 'pre-edit', '--mode', 'blokc'], '{}');
+  } catch {
+    badMode = true;
+  }
+  assert(badMode, 'hook rejects an invalid --mode up front');
 
   const activityFile = path.join(tmpHome, '.agent-memory', 'activity.jsonl');
   fs.writeFileSync(activityFile, JSON.stringify({
@@ -156,6 +229,18 @@ try {
   }) + '\n');
   const ttlOut = run(['board']);
   assert(ttlOut.includes('No active claims'), 'board hides expired claims');
+  assert(fs.readFileSync(activityFile, 'utf8').trim() === '', 'board compacts expired lines from the file');
+
+  // doctor: repairs a board with unparseable lines (backs it up first).
+  fs.writeFileSync(
+    activityFile,
+    'this is not json\n' + JSON.stringify({ agent: 'codex', files: ['ok.js'], ts: Date.now() }) + '\n'
+  );
+  run(['doctor']);
+  assert(fs.existsSync(activityFile + '.bak'), 'doctor backs up the broken board');
+  const fixedLines = fs.readFileSync(activityFile, 'utf8').trim().split('\n');
+  assert(fixedLines.length === 1 && fixedLines[0].includes('ok.js'), 'doctor drops unparseable board lines');
+  fs.unlinkSync(activityFile);
 
   run(['coordination', 'off']);
   const claudeCoordOff = fs.readFileSync(path.join(tmpHome, '.claude', 'CLAUDE.md'), 'utf8');
@@ -164,6 +249,17 @@ try {
   const commandsOff = settingsOff.hooks.PreToolUse.flatMap((entry) => entry.hooks || []).map((h) => h.command);
   assert(commandsOff.includes('echo keep-me'), 'coordination off preserves unrelated hook');
   assert(!commandsOff.some((c) => c && c.includes('hook pre-edit')), 'coordination off removes only its hook');
+
+  // uninstall must also tear coordination down — a stale hook would fail on
+  // every edit in Claude Code.
+  run(['coordination', 'on']);
+  run(['uninstall']);
+  const settingsUn = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+  const commandsUn = settingsUn.hooks.PreToolUse.flatMap((entry) => entry.hooks || []).map((h) => h.command);
+  assert(!commandsUn.some((c) => c && c.includes('hook pre-edit')), 'uninstall removes the coordination hook');
+  assert(commandsUn.includes('echo keep-me'), 'uninstall preserves unrelated hooks');
+  const mdUn = fs.readFileSync(path.join(tmpHome, '.claude', 'CLAUDE.md'), 'utf8');
+  assert(!mdUn.includes('shared-agent-memory-coordination'), 'uninstall removes the coordination block');
 
   console.log('\nAll smoke tests passed.');
 } finally {

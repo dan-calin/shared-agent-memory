@@ -9,12 +9,13 @@ const claude = require('../lib/claude');
 const codex = require('../lib/codex');
 const instructions = require('../lib/instructions');
 const store = require('../lib/store');
+const fsx = require('../lib/fsx');
 const board = require('../lib/board');
 const coordination = require('../lib/coordination');
 
 function parseArgs(argv) {
   const out = { _: [], flags: {} };
-  const valueFlags = new Set(['memory-dir', 'as', 'note', 'mode']);
+  const valueFlags = new Set(['memory-dir', 'as', 'note', 'mode', 'session']);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith('--') && a.includes('=')) {
@@ -22,7 +23,7 @@ function parseArgs(argv) {
       const key = a.slice(2, eq);
       const value = a.slice(eq + 1);
       out.flags[key === 'memory-dir' ? 'memoryDir' : key] = value;
-    } else if (valueFlags.has(a.slice(2))) {
+    } else if (a.startsWith('--') && valueFlags.has(a.slice(2))) {
       const key = a.slice(2);
       if (i + 1 >= argv.length) throw new Error(`${a} requires a value`);
       out.flags[key === 'memory-dir' ? 'memoryDir' : key] = argv[++i];
@@ -140,6 +141,12 @@ function cmdUninstall(flags) {
   log.step(`Codex: ${codex.uninstall({ dry }).msg}`);
   log.step(`Codex instructions: ${instructions.removeFrom(paths.codexInstructionsFile(), dry)}`);
 
+  // Also tear down coordination if it was on — a leftover PreToolUse hook
+  // pointing at a deleted CLI would fail on every edit in Claude Code.
+  log.step(`Coordination instructions (Claude): ${coordination.removeInstructions(paths.claudeInstructionsFile(), dry)}`);
+  log.step(`Coordination instructions (Codex): ${coordination.removeInstructions(paths.codexInstructionsFile(), dry)}`);
+  log.step(`Coordination hook (Claude): ${coordination.removeClaudeHook(paths.claudeSettingsFile(), dry)}`);
+
   const memoryDir = resolveMemoryDir(flags);
   if (flags.purge) {
     if (!dry) fs.rmSync(memoryDir, { recursive: true, force: true });
@@ -152,14 +159,10 @@ function cmdUninstall(flags) {
   log.info('Restart your agents so they drop the server + instructions.');
 }
 
-function mark(ok) {
-  return ok ? '\x1b[32m✓\x1b[0m' : '\x1b[2m–\x1b[0m';
-}
-
-function cmdStatus() {
+function cmdStatus(flags) {
   log.title('shared-agent-memory status');
 
-  const memoryDir = paths.defaultMemoryDir();
+  const memoryDir = resolveMemoryDir(flags);
   const memoryFile = paths.memoryFile(memoryDir);
   log.info(`Memory store: ${memoryDir}`);
   log.info(`Memory file:  ${fs.existsSync(memoryFile) ? memoryFile + '  (exists)' : memoryFile + '  (missing)'}`);
@@ -171,22 +174,27 @@ function cmdStatus() {
   ];
   for (const [name, st, instrFile] of rows) {
     if (!st.present) {
-      log.plain(`  ${name.padEnd(12)} ${mark(false)} not installed on this machine`);
+      log.plain(`  ${name.padEnd(12)} ${log.mark(false)} not installed on this machine`);
       continue;
     }
     const instrOk = instructions.isInstalled(instrFile);
     log.plain(
-      `  ${name.padEnd(12)} server ${mark(st.configured)}   instructions ${mark(instrOk)}`
+      `  ${name.padEnd(12)} server ${log.mark(st.configured)}   instructions ${log.mark(instrOk)}`
     );
   }
 }
 
 function cmdDoctor(flags) {
   const dry = Boolean(flags['dry-run']);
-  const file = paths.memoryFile(resolveMemoryDir(flags));
+  const memoryDir = resolveMemoryDir(flags);
+  const file = paths.memoryFile(memoryDir);
   log.title('shared-agent-memory doctor');
   log.info(`Memory file: ${file}`);
+  doctorMemory(file, dry);
+  doctorBoard(memoryDir, dry);
+}
 
+function doctorMemory(file, dry) {
   if (!fs.existsSync(file)) {
     log.info('No memory file yet — nothing to check.');
     return;
@@ -202,7 +210,7 @@ function cmdDoctor(flags) {
     log.warn('Store is pretty-printed JSON — the memory server cannot read this.');
     if (dry) return log.info('Dry run — would back up the file and rewrite it as NDJSON.');
     fs.writeFileSync(file + '.bak', raw);
-    fs.writeFileSync(file, store.toNdjson(result.doc));
+    fsx.writeFileAtomic(file, store.toNdjson(result.doc));
     log.ok(`Repaired → NDJSON. Original backed up to ${file}.bak`);
     return log.info('Restart your agents; memory search/read will work again.');
   }
@@ -211,6 +219,31 @@ function cmdDoctor(flags) {
     fs.writeFileSync(file + '.bak', raw);
     log.info(`Backed up to ${file}.bak — inspect it by hand, or delete the store to reset.`);
   }
+}
+
+// The coordination board is the same hand-editable-NDJSON risk as the memory
+// file: report unparseable lines and repair by dropping them (with a backup).
+function doctorBoard(memoryDir, dry) {
+  const file = board.boardFile(memoryDir);
+  if (!fs.existsSync(file)) return log.info('No coordination board file — nothing to check.');
+  const raw = fs.readFileSync(file, 'utf8');
+  const lines = raw.split(/\r?\n/).filter((l) => l.trim());
+  const bad = lines.filter((l) => {
+    try {
+      JSON.parse(l);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  if (bad.length === 0) {
+    return log.ok(`Board is valid NDJSON (${lines.length} claim${lines.length === 1 ? '' : 's'} incl. expired) — OK.`);
+  }
+  log.warn(`Board has ${bad.length} unparseable line${bad.length === 1 ? '' : 's'} (they are being ignored).`);
+  if (dry) return log.info('Dry run — would back up the file and drop the bad lines.');
+  fs.writeFileSync(file + '.bak', raw);
+  board.compact(memoryDir); // rewrites only the valid, unexpired claims
+  log.ok(`Repaired board. Original backed up to ${file}.bak`);
 }
 
 function cmdInstructions(flags) {
@@ -227,6 +260,13 @@ function requireAgent(flags) {
   return String(flags.as);
 }
 
+// Session id lets two parallel sessions of the SAME tool (e.g. two Claude Code
+// windows) coordinate. Explicit --session wins; otherwise picked up from the
+// environment when the agent runs this CLI from inside a session.
+function sessionOf(flags) {
+  return String(flags.session || process.env.CLAUDE_SESSION_ID || '');
+}
+
 function formatConflict(conflict) {
   const note = conflict.note ? ` - ${conflict.note}` : '';
   return `${conflict.agent} claims ${conflict.file} (${conflict.ageMin}m old)${note}`;
@@ -237,7 +277,9 @@ function cmdClaim(args, flags) {
   const files = args.slice(1);
   if (files.length === 0) throw new Error('claim requires at least one file');
   const memoryDir = resolveMemoryDir(flags);
-  const conflicts = board.claim(memoryDir, agent, files, flags.note || '', process.cwd());
+  const conflicts = board.claim(
+    memoryDir, agent, files, flags.note || '', process.cwd(), sessionOf(flags), Boolean(flags.replace)
+  );
   log.ok(`Claimed ${files.length} file${files.length === 1 ? '' : 's'} as ${agent}.`);
   if (conflicts.length) {
     log.warn('Active conflict warning:');
@@ -247,12 +289,14 @@ function cmdClaim(args, flags) {
 
 function cmdRelease(flags) {
   const agent = requireAgent(flags);
-  const count = board.release(resolveMemoryDir(flags), agent);
+  const count = board.release(resolveMemoryDir(flags), agent, sessionOf(flags));
   log.ok(`Released ${count} claim${count === 1 ? '' : 's'} for ${agent}.`);
 }
 
 function cmdBoard(flags) {
-  const claims = board.readClaims(resolveMemoryDir(flags));
+  const memoryDir = resolveMemoryDir(flags);
+  board.compact(memoryDir); // drop expired lines while we're here
+  const claims = board.readClaims(memoryDir);
   log.title('shared-agent-memory board');
   if (claims.length === 0) {
     log.info('No active claims.');
@@ -261,13 +305,18 @@ function cmdBoard(flags) {
   for (const c of claims) {
     const ageMin = Math.round((Date.now() - c.ts) / 60000);
     const note = c.note ? ` - ${c.note}` : '';
-    log.plain(`  ${c.agent} (${ageMin}m)${note}`);
+    const project = c.project ? `  [${c.project}]` : '';
+    log.plain(`  ${c.agent} (${ageMin}m)${note}${project}`);
     for (const file of c.files || []) log.plain(`    - ${file}`);
   }
 }
 
 function readStdin() {
-  return fs.readFileSync(0, 'utf8');
+  try {
+    return fs.readFileSync(0, 'utf8');
+  } catch {
+    return ''; // no stdin (e.g. run by hand from a terminal)
+  }
 }
 
 function conflictWarning(file, conflicts) {
@@ -285,14 +334,28 @@ function cmdHook(args, flags) {
   if (hook !== 'pre-edit') throw new Error('hook only supports: pre-edit');
   if (sub) throw new Error(`unknown hook argument: ${sub}`);
 
+  // Validate up front — a typo'd mode must fail at install/test time, not weeks
+  // later on the first real conflict.
   const mode = flags.mode || 'warn';
+  if (mode !== 'warn' && mode !== 'block') throw new Error('--mode must be warn or block');
+
   const raw = readStdin().trim();
-  const payload = raw ? JSON.parse(raw) : {};
+  let payload = {};
+  try {
+    payload = raw ? JSON.parse(raw) : {};
+  } catch {
+    return; // malformed hook payload — never break the user's edit over it
+  }
   const input = payload.tool_input || payload.toolInput || payload.input || {};
   const file = input.file_path || input.filePath || input.path;
   if (!file) return;
 
-  const conflicts = board.checkFile(resolveMemoryDir(flags), 'claude', file);
+  // session_id distinguishes parallel Claude Code sessions; cwd anchors
+  // relative claims to the right project.
+  const session = String(payload.session_id || '');
+  const conflicts = board.checkFile(
+    resolveMemoryDir(flags), 'claude', file, session, payload.cwd || process.cwd()
+  );
   if (conflicts.length === 0) return;
 
   const warning = conflictWarning(file, conflicts);
@@ -301,7 +364,6 @@ function cmdHook(args, flags) {
     process.exitCode = 2;
     return;
   }
-  if (mode !== 'warn') throw new Error('--mode must be warn or block');
   console.log(JSON.stringify({
     hookSpecificOutput: {
       hookEventName: coordination.HOOK_EVENT,
@@ -314,15 +376,26 @@ function cmdCoordination(args, flags) {
   const action = args[1] || 'status';
   const dry = Boolean(flags['dry-run']);
   const cliFile = path.resolve(__dirname, 'cli.js');
-  const hookCmd = coordination.hookCommand(cliFile);
 
   if (action === 'on') {
+    const mode = flags.mode || 'warn';
+    if (mode !== 'warn' && mode !== 'block') throw new Error('--mode must be warn or block');
+    // Bake a custom memory dir into the hook command, or the hook would check
+    // the default board while claims land in the custom one.
+    const hookCmd = coordination.hookCommand(cliFile, {
+      mode,
+      memoryDir: flags.memoryDir ? resolveMemoryDir(flags) : null,
+    });
     log.title('Turning shared-agent-memory coordination on' + (dry ? ' (dry run)' : ''));
     log.step(`Claude Code instructions: ${coordination.installInstructions(paths.claudeInstructionsFile(), 'claude', dry)} (${paths.claudeInstructionsFile()})`);
     log.step(`Codex instructions: ${coordination.installInstructions(paths.codexInstructionsFile(), 'codex', dry)} (${paths.codexInstructionsFile()})`);
     log.step(`Claude Code PreToolUse hook: ${coordination.installClaudeHook(paths.claudeSettingsFile(), hookCmd, dry)} (${paths.claudeSettingsFile()})`);
     log.done();
-    log.info('Coordination uses advisory file-path claims and warnings; it does not block edits by default.');
+    log.info(
+      mode === 'block'
+        ? 'Coordination hook installed in BLOCK mode — conflicting edits are refused until the claim is released or expires.'
+        : 'Coordination uses advisory file-path claims and warnings; it does not block edits by default.'
+    );
     return;
   }
 
@@ -330,16 +403,17 @@ function cmdCoordination(args, flags) {
     log.title('Turning shared-agent-memory coordination off' + (dry ? ' (dry run)' : ''));
     log.step(`Claude Code instructions: ${coordination.removeInstructions(paths.claudeInstructionsFile(), dry)}`);
     log.step(`Codex instructions: ${coordination.removeInstructions(paths.codexInstructionsFile(), dry)}`);
-    log.step(`Claude Code PreToolUse hook: ${coordination.removeClaudeHook(paths.claudeSettingsFile(), hookCmd, dry)}`);
+    log.step(`Claude Code PreToolUse hook: ${coordination.removeClaudeHook(paths.claudeSettingsFile(), dry)}`);
     log.done();
     return;
   }
 
   if (action === 'status') {
+    const hookMode = coordination.claudeHookMode(paths.claudeSettingsFile());
     log.title('shared-agent-memory coordination status');
-    log.plain(`  Claude instructions ${mark(coordination.instructionsInstalled(paths.claudeInstructionsFile()))}`);
-    log.plain(`  Codex instructions  ${mark(coordination.instructionsInstalled(paths.codexInstructionsFile()))}`);
-    log.plain(`  Claude hook         ${mark(coordination.claudeHookInstalled(paths.claudeSettingsFile(), hookCmd))}`);
+    log.plain(`  Claude instructions ${log.mark(coordination.instructionsInstalled(paths.claudeInstructionsFile()))}`);
+    log.plain(`  Codex instructions  ${log.mark(coordination.instructionsInstalled(paths.codexInstructionsFile()))}`);
+    log.plain(`  Claude hook         ${log.mark(hookMode !== null)}${hookMode ? ` (${hookMode})` : ''}`);
     return;
   }
 
@@ -360,7 +434,7 @@ Commands:
   board         Show active coordination claims
   coordination  Turn advisory coordination instructions/hooks on or off
   hook          Internal hook entrypoints for supported agents
-  doctor        Check the memory file's format and repair it if corrupted
+  doctor        Check/repair the memory file and coordination board formats
   uninstall     Remove the memory server + instruction blocks
   status        Show what is currently configured
   help          Show this help
@@ -372,7 +446,12 @@ Options:
                        instruction block — print it for you to paste instead
   --as <agent>         Agent label for claim/release (for example codex, claude)
   --note <text>        Short note for a claim
-  --mode <warn|block>  Hook behavior (default: warn)
+  --session <id>       Session id for claim/release, so two parallel sessions of
+                       the same tool coordinate (auto-detected from
+                       CLAUDE_SESSION_ID when unset)
+  --replace            (claim) start a fresh claim instead of merging files
+                       into this agent's existing one
+  --mode <warn|block>  (coordination on) hook behavior (default: warn)
   --memory-dir <path>  Use a custom shared memory directory
                        (default: ~/.agent-memory)
   --dry-run            Print what would change without writing anything
@@ -392,7 +471,7 @@ Examples:
 
 function main() {
   const { _, flags } = parseArgs(process.argv.slice(2));
-  const cmd = _[0] || (flags.help ? 'help' : 'help');
+  const cmd = _[0] || 'help';
   try {
     switch (cmd) {
       case 'install':
