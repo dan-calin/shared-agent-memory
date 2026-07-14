@@ -13,10 +13,10 @@ const board = require('../lib/board');
 const cli = path.join(__dirname, '..', 'bin', 'cli.js');
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sam-test-'));
 
-function run(args, input) {
+function run(args, input, cwd) {
   const env = { ...process.env, SHARED_AGENT_MEMORY_HOME: tmpHome, NO_COLOR: '1' };
   delete env.CLAUDE_SESSION_ID; // keep session behavior deterministic in tests
-  return execFileSync('node', [cli, ...args], { env, encoding: 'utf8', input });
+  return execFileSync('node', [cli, ...args], { env, encoding: 'utf8', input, cwd });
 }
 
 function assert(cond, msg) {
@@ -100,6 +100,38 @@ try {
   const rec = JSON.parse(repaired);
   assert(rec.type === 'entity' && rec.name === 'p/x', 'doctor preserved the entity data');
   assert(fs.existsSync(memFile + '.bak'), 'doctor backed up the original');
+
+  // Project init: creates .shared-memory plus selected agent instruction files.
+  const tmpProject = fs.mkdtempSync(path.join(tmpHome, 'project-'));
+  fs.writeFileSync(path.join(tmpProject, 'CLAUDE.md'), '# Existing Claude notes\n\nDo not remove me.\n');
+  const initOut = run(['init', '--agents', 'all'], undefined, tmpProject);
+  assert(initOut.includes('Project shared memory init'), 'init reports project setup');
+  assert(fs.existsSync(path.join(tmpProject, '.shared-memory', 'memory.json')), 'init creates project memory');
+  assert(fs.existsSync(path.join(tmpProject, '.shared-memory', 'activity.jsonl')), 'init creates project board');
+  assert(fs.existsSync(path.join(tmpProject, '.shared-memory', 'manifest.json')), 'init creates project manifest');
+  assert(fs.existsSync(path.join(tmpProject, '.shared-memory', 'INSTRUCTIONS.md')), 'init creates manual instructions');
+  assert(fs.readFileSync(path.join(tmpProject, 'AGENTS.md'), 'utf8').includes('shared-agent-memory-project'), 'init writes Codex instructions');
+  const claudeProjectMd = fs.readFileSync(path.join(tmpProject, 'CLAUDE.md'), 'utf8');
+  assert(claudeProjectMd.includes('Do not remove me.') && claudeProjectMd.includes('shared-agent-memory-project'), 'init preserves existing Claude instructions');
+  assert(fs.existsSync(path.join(tmpProject, '.cursor', 'rules', 'shared-agent-memory.mdc')), 'init writes Cursor rule');
+  assert(fs.existsSync(path.join(tmpProject, '.windsurf', 'rules', 'shared-agent-memory.md')), 'init writes Windsurf rule');
+  assert(fs.existsSync(path.join(tmpProject, 'GEMINI.md')), 'init writes Gemini instructions');
+  assert(fs.existsSync(path.join(tmpProject, 'CONVENTIONS.md')), 'init writes Aider conventions');
+
+  const projectClaim = run(['claim', 'project.js', '--as', 'codex'], undefined, tmpProject);
+  assert(projectClaim.includes('Claimed 1 file as codex'), 'claim works inside initialized project');
+  const projectActivity = fs.readFileSync(path.join(tmpProject, '.shared-memory', 'activity.jsonl'), 'utf8');
+  assert(projectActivity.includes('project.js'), 'project claim uses project-local board');
+  const projectStatus = run(['status'], undefined, tmpProject);
+  assert(projectStatus.includes('Active scope: PROJECT'), 'status detects project scope');
+  run(['release', '--as', 'codex'], undefined, tmpProject);
+
+  run(['init', '--agents', 'all'], undefined, tmpProject);
+  const claudeMarkers = (fs.readFileSync(path.join(tmpProject, 'CLAUDE.md'), 'utf8').match(/BEGIN shared-agent-memory-project/g) || []).length;
+  assert(claudeMarkers === 1, 'init updates its marker block instead of duplicating it');
+  const cursorRule = fs.readFileSync(path.join(tmpProject, '.cursor', 'rules', 'shared-agent-memory.mdc'), 'utf8');
+  const cursorFrontmatterCount = (cursorRule.match(/alwaysApply: true/g) || []).length;
+  assert(cursorFrontmatterCount === 1, 'init does not duplicate Cursor rule frontmatter');
 
   // Coordination opt-in: marker block plus Claude PreToolUse hook, preserving unrelated hooks.
   const settingsFile = path.join(tmpHome, '.claude', 'settings.json');

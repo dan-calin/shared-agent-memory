@@ -12,10 +12,11 @@ const store = require('../lib/store');
 const fsx = require('../lib/fsx');
 const board = require('../lib/board');
 const coordination = require('../lib/coordination');
+const project = require('../lib/project');
 
 function parseArgs(argv) {
   const out = { _: [], flags: {} };
-  const valueFlags = new Set(['memory-dir', 'as', 'note', 'mode', 'session']);
+  const valueFlags = new Set(['memory-dir', 'as', 'note', 'mode', 'session', 'agents']);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith('--') && a.includes('=')) {
@@ -38,6 +39,11 @@ function parseArgs(argv) {
 
 function resolveMemoryDir(flags) {
   return flags.memoryDir ? path.resolve(flags.memoryDir) : paths.defaultMemoryDir();
+}
+
+function resolveActiveMemoryDir(flags, cwd) {
+  if (flags.memoryDir) return path.resolve(flags.memoryDir);
+  return project.findMemoryDir(cwd || process.cwd()) || paths.defaultMemoryDir();
 }
 
 function selectTargets(flags) {
@@ -162,10 +168,13 @@ function cmdUninstall(flags) {
 function cmdStatus(flags) {
   log.title('shared-agent-memory status');
 
-  const memoryDir = resolveMemoryDir(flags);
+  const memoryDir = resolveActiveMemoryDir(flags);
   const memoryFile = paths.memoryFile(memoryDir);
+  const scope = project.findMemoryDir(process.cwd()) === memoryDir ? 'project' : 'global';
+  log.info(`Active scope: ${scope.toUpperCase()}`);
   log.info(`Memory store: ${memoryDir}`);
   log.info(`Memory file:  ${fs.existsSync(memoryFile) ? memoryFile + '  (exists)' : memoryFile + '  (missing)'}`);
+  if (scope === 'global') log.info('Tip: run `shared-agent-memory init` inside a repo to enable project-local memory.');
   log.plain('');
 
   const rows = [
@@ -186,7 +195,7 @@ function cmdStatus(flags) {
 
 function cmdDoctor(flags) {
   const dry = Boolean(flags['dry-run']);
-  const memoryDir = resolveMemoryDir(flags);
+  const memoryDir = resolveActiveMemoryDir(flags);
   const file = paths.memoryFile(memoryDir);
   log.title('shared-agent-memory doctor');
   log.info(`Memory file: ${file}`);
@@ -276,7 +285,7 @@ function cmdClaim(args, flags) {
   const agent = requireAgent(flags);
   const files = args.slice(1);
   if (files.length === 0) throw new Error('claim requires at least one file');
-  const memoryDir = resolveMemoryDir(flags);
+  const memoryDir = resolveActiveMemoryDir(flags);
   const conflicts = board.claim(
     memoryDir, agent, files, flags.note || '', process.cwd(), sessionOf(flags), Boolean(flags.replace)
   );
@@ -289,17 +298,20 @@ function cmdClaim(args, flags) {
 
 function cmdRelease(flags) {
   const agent = requireAgent(flags);
-  const count = board.release(resolveMemoryDir(flags), agent, sessionOf(flags));
+  const count = board.release(resolveActiveMemoryDir(flags), agent, sessionOf(flags));
   log.ok(`Released ${count} claim${count === 1 ? '' : 's'} for ${agent}.`);
 }
 
 function cmdBoard(flags) {
-  const memoryDir = resolveMemoryDir(flags);
+  const memoryDir = resolveActiveMemoryDir(flags);
   board.compact(memoryDir); // drop expired lines while we're here
   const claims = board.readClaims(memoryDir);
   log.title('shared-agent-memory board');
   if (claims.length === 0) {
     log.info('No active claims.');
+    if (!project.findMemoryDir(process.cwd()) && !flags.memoryDir) {
+      log.info('Tip: run `shared-agent-memory init` inside a repo for a project-local board.');
+    }
     return;
   }
   for (const c of claims) {
@@ -354,7 +366,7 @@ function cmdHook(args, flags) {
   // relative claims to the right project.
   const session = String(payload.session_id || '');
   const conflicts = board.checkFile(
-    resolveMemoryDir(flags), 'claude', file, session, payload.cwd || process.cwd()
+    resolveActiveMemoryDir(flags, payload.cwd || process.cwd()), 'claude', file, session, payload.cwd || process.cwd()
   );
   if (conflicts.length === 0) return;
 
@@ -420,6 +432,34 @@ function cmdCoordination(args, flags) {
   throw new Error('coordination supports: on, off, status');
 }
 
+async function cmdInit(flags) {
+  const dry = Boolean(flags['dry-run']);
+  const root = process.cwd();
+  const agentIds = flags.agents
+    ? project.normalizeAgentIds(flags.agents)
+    : await project.selectAgentsInteractive();
+  const result = project.ensureProject(root, agentIds, dry);
+
+  log.title('Project shared memory init' + (dry ? ' (dry run)' : ''));
+  log.step(`Project memory: ${result.dir}`);
+  for (const f of result.created) log.step(`Created: ${f}`);
+  if (result.created.length === 0) log.step('Project memory files already exist');
+
+  if (result.installed.length) {
+    log.plain('');
+    log.info('Installed instructions:');
+    for (const item of result.installed) {
+      const rel = path.relative(root, item.file) || item.file;
+      log.step(`${item.agent.label}: ${item.result} (${rel})`);
+    }
+  }
+
+  log.plain('');
+  log.info('Manual instructions are always available at .shared-memory/INSTRUCTIONS.md');
+  log.info('Restart your AI coding tool, or ask it to read that file before working here.');
+  log.done();
+}
+
 const HELP = `
 shared-agent-memory — one shared memory for all your AI coding agents
 
@@ -428,6 +468,7 @@ Usage:
 
 Commands:
   install       Configure detected agents (Claude Code, Codex) to share memory
+  init          Enable project-local memory and guided agent instructions
   instructions  Print the instruction block(s) to paste into a .md yourself
   claim         Claim files on the shared coordination board
   release       Release this agent's active coordination claim
@@ -452,6 +493,8 @@ Options:
   --replace            (claim) start a fresh claim instead of merging files
                        into this agent's existing one
   --mode <warn|block>  (coordination on) hook behavior (default: warn)
+  --agents <list|all>  (init) comma-separated agents: codex, claude, cursor,
+                       windsurf, gemini, aider, manual
   --memory-dir <path>  Use a custom shared memory directory
                        (default: ~/.agent-memory)
   --dry-run            Print what would change without writing anything
@@ -459,6 +502,8 @@ Options:
 
 Examples:
   npx github:dan-calin/shared-agent-memory install
+  shared-agent-memory init
+  shared-agent-memory init --agents codex,claude,cursor
   shared-agent-memory install --manual
   shared-agent-memory instructions --codex-only
   shared-agent-memory coordination on
@@ -469,13 +514,15 @@ Examples:
   shared-agent-memory uninstall --purge
 `;
 
-function main() {
+async function main() {
   const { _, flags } = parseArgs(process.argv.slice(2));
   const cmd = _[0] || 'help';
   try {
     switch (cmd) {
       case 'install':
         return cmdInstall(flags);
+      case 'init':
+        return await cmdInit(flags);
       case 'instructions':
         return cmdInstructions(flags);
       case 'claim':

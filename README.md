@@ -29,6 +29,53 @@ hand-write context files and paste them around. This replaces that with a shared
 instead of re-reading a growing document — which keeps it fast and cheap even
 after months of use.
 
+## Project-local memory
+
+For serious repos, turn on a project-local memory folder:
+
+```bash
+cd path/to/your/project
+shared-agent-memory init
+```
+
+`init` opens a terminal selector: use the arrow keys to move, press Enter to
+select the AI tools you use, then press Enter on **Continue**. It creates:
+
+```text
+.shared-memory/
+  memory.json
+  activity.jsonl
+  manifest.json
+  INSTRUCTIONS.md
+```
+
+For known tools it also writes the right project instruction file:
+
+| Tool | File written |
+| --- | --- |
+| Codex | `AGENTS.md` |
+| Claude Code | `CLAUDE.md` |
+| Cursor | `.cursor/rules/shared-agent-memory.mdc` |
+| Windsurf | `.windsurf/rules/shared-agent-memory.md` |
+| Gemini CLI | `GEMINI.md` |
+| Aider | `CONVENTIONS.md` |
+| Other tools | `.shared-memory/INSTRUCTIONS.md` |
+
+Need a non-interactive setup for scripts? Use:
+
+```bash
+shared-agent-memory init --agents codex,claude,cursor
+shared-agent-memory init --agents all
+```
+
+After `init`, `status`, `claim`, `board`, `release`, and `doctor` automatically
+use `.shared-memory/` when you run them inside that project. Outside an
+initialized project, they fall back to `~/.agent-memory/`.
+
+Existing instruction files are safe: `init` appends a marker-wrapped block and
+future runs update only that block. It does not overwrite your own `CLAUDE.md`,
+`AGENTS.md`, `GEMINI.md`, or `CONVENTIONS.md` content.
+
 ## Edit coordination
 
 When you run Claude Code and Codex in the same repo, shared memory is not enough:
@@ -150,6 +197,7 @@ not linked or installed it globally, run the same commands as
 
 ```
 shared-agent-memory install       Configure detected agents to share memory
+shared-agent-memory init          Enable project-local memory and guided setup
 shared-agent-memory instructions  Print the instruction block(s) to paste in yourself
 shared-agent-memory coordination  Turn optional edit coordination on/off/status
 shared-agent-memory claim         Claim files on the shared coordination board
@@ -164,8 +212,9 @@ shared-agent-memory help          Full help
 Options: `--claude-only`, `--codex-only`, `--manual`, `--memory-dir <path>`,
 `--as <agent>`, `--note <text>`, `--session <id>` (claim/release: distinguish
 parallel sessions of the same tool), `--replace` (claim: fresh claim instead of
-merging), `--mode <warn|block>` (coordination on: hook behavior), `--dry-run`,
-and `--purge` (uninstall: also delete the memory store).
+merging), `--mode <warn|block>` (coordination on: hook behavior),
+`--agents <list|all>` (init), `--dry-run`, and `--purge` (uninstall: also delete
+the memory store).
 
 ### Where the instructions go (and how to keep control)
 
